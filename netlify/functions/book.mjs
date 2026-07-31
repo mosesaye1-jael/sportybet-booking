@@ -265,6 +265,60 @@ export async function handler(event) {
   };
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
 
+  /*
+   * GET ?slip=... — books a slip and returns a page.
+   *
+   * The artifact sandbox blocks fetch() to outside domains, so the Slip Engine
+   * opens this in a new tab rather than calling it in the background.
+   * Format: home~away~pick|home~away~pick|...
+   */
+  if (event.httpMethod === "GET" && event.queryStringParameters?.slip) {
+    const html = (body) => ({
+      statusCode: 200,
+      headers: { ...cors, "Content-Type": "text/html; charset=utf-8" },
+      body: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Booking code</title><body style="margin:0;background:#12161B;color:#EFE9DC;font-family:system-ui,sans-serif;padding:28px 20px;line-height:1.6">${body}</body>`,
+    });
+
+    try {
+      const selections = String(event.queryStringParameters.slip).split("|").filter(Boolean).map((row) => {
+        const [home, away, pick] = row.split("~");
+        return prepare({ match: `${home} vs ${away}`, home, away, pick: pick || "Home" });
+      });
+      if (!selections.length) return html(`<p style="color:#C25B47">Empty slip.</p>`);
+
+      const { results, scanned } = await resolveAll(selections);
+      const failures = results.filter((r) => r.error).map((r) => r.error);
+      if (failures.length)
+        return html(`<h2 style="font-size:17px;font-weight:600;margin:0 0 14px">${failures.length} of ${selections.length} couldn't be resolved</h2>`
+          + failures.map((f) => `<p style="color:#C25B47;font-size:14px;border-left:2px solid #C25B47;padding-left:12px">${f}</p>`).join("")
+          + `<p style="color:#8A94A3;font-size:13px;margin-top:20px">Scanned ${scanned} fixtures. Remove these legs in the Slip Engine and try again.</p>`);
+
+      const res = await fetch(CONFIG.BOOKING_URL, {
+        method: "POST", headers: CONFIG.HEADERS,
+        body: JSON.stringify({ selections: results.map((r) => r.booking) }),
+      });
+      const data = await res.json();
+      const code = data?.data?.shareCode;
+      if (!code) return html(`<p style="color:#C25B47">SportyBet returned no code (HTTP ${res.status}).</p>`);
+
+      const info = results.map((r) => r.info);
+      const total = info.reduce((a, i) => a * i.liveOdds, 1).toFixed(2);
+      return html(
+        `<div style="max-width:520px;margin:0 auto">
+<div style="font-size:11px;letter-spacing:.2em;color:#E0A02E;font-weight:700">BOOKING CODE</div>
+<div style="font-family:ui-monospace,monospace;font-size:46px;font-weight:700;letter-spacing:.14em;margin:6px 0 4px">${code}</div>
+<div style="color:#8A94A3;font-size:14px;margin-bottom:20px">${info.length} legs &middot; ${total} combined</div>
+<a href="${data?.data?.shareURL || "https://www.sportybet.com/ng/?shareCode=" + code}" style="display:block;background:#E0A02E;color:#12161B;text-decoration:none;text-align:center;padding:15px;border-radius:8px;font-weight:700;margin-bottom:10px">Open in SportyBet</a>
+<button onclick="navigator.clipboard.writeText('${code}');this.textContent='Copied'" style="width:100%;background:#212936;color:#EFE9DC;border:1px solid #2E3846;padding:14px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Copy code</button>
+<div style="margin-top:24px;border-top:1px solid #2E3846;padding-top:16px">`
+        + info.map((i) => `<div style="display:flex;justify-content:space-between;gap:12px;font-size:13px;padding:7px 0;border-bottom:1px dashed #2E3846"><span>${i.name}</span><span style="font-family:ui-monospace,monospace;color:#57A99A">${i.liveOdds}</span></div>`).join("")
+        + `</div></div>`);
+    } catch (e) {
+      return html(`<p style="color:#C25B47">${e.message}</p>`);
+    }
+  }
+
   /* GET — health check. Reads the catalogue, books nothing. */
   if (event.httpMethod === "GET") {
     try {
