@@ -35,8 +35,189 @@ const CONFIG = {
   },
 };
 
-/* Confirmed: market "1" is 1X2, outcomes 1 = Home, 2 = Draw, 3 = Away. */
+/*
+ * Market catalogue, discovered live on 31 Jul by sweeping marketId in batches.
+ * Used ONLY to decide which market IDs to request — matching itself happens
+ * against the descriptions the API actually returns, so a market renamed or
+ * added upstream still resolves.
+ *
+ * Requesting every market at once overloads the API (7kB in 8s = a choke), so
+ * we ask for just the ones a slip needs.
+ */
+const MARKET_CATALOGUE = [
+  ["1", "1X2"],
+  ["8", "1st Goal"],
+  ["9", "Last Goal"],
+  ["10", "Double Chance"],
+  ["11", "Draw No Bet"],
+  ["12", "Home No Bet"],
+  ["13", "Away No Bet"],
+  ["14", "Handicap"],
+  ["15", "Winning Margin"],
+  ["16", "Asian Handicap -1.5"],
+  ["18", "Over/Under"],
+  ["19", "South Africa Over/Under"],
+  ["20", "Ivory Coast Over/Under"],
+  ["21", "Exact Goals"],
+  ["23", "Home Team Goals"],
+  ["24", "Away Team Goals"],
+  ["25", "Goal Range"],
+  ["26", "Odd/Even"],
+  ["27", "Home Team Odd/Even"],
+  ["28", "Away Team Odd/Even"],
+  ["29", "GG/NG"],
+  ["30", "Teams to Score"],
+  ["31", "Home Team Clean Sheet"],
+  ["32", "Away Team Clean Sheet"],
+  ["33", "Home Team to Win to Nil"],
+  ["34", "Away Team to Win to Nil"],
+  ["35", "1X2 & GG/NG"],
+  ["36", "Over/Under & GG/NG"],
+  ["37", "1X2 & Over/Under 1.5"],
+  ["38", "1st Goalscorer"],
+  ["39", "Last Goalscorer"],
+  ["40", "Anytime Goalscorer"],
+  ["41", "Correct Score [0:0]"],
+  ["45", "Correct Score"],
+  ["46", "Half Time/Full Time Correct Score"],
+  ["47", "Half Time/Full Time"],
+  ["48", "Home Team to Win Both Halves"],
+  ["49", "Away Team to Win Both Halves"],
+  ["50", "Home Team to Win Either Half"],
+  ["51", "Away Team to Win Either Half"],
+  ["52", "Highest Scoring Half"],
+  ["53", "Home Team Highest Scoring Half"],
+  ["54", "Away Team Highest Scoring Half"],
+  ["55", "1st/2nd Half GG/NG"],
+  ["56", "Home Team to Score In Both Halves"],
+  ["57", "Away Team to Score In Both Halves"],
+  ["58", "Both Halves Over 1.5"],
+  ["59", "Both Halves Under 1.5"],
+  ["60", "1st Half - 1X2"],
+  ["62", "1st Half - 1st Goal"],
+  ["63", "1st Half - Double Chance"],
+  ["64", "1st Half - Draw No Bet"],
+  ["65", "1st Half - Handicap"],
+  ["66", "1st Half - Asian Handicap"],
+  ["68", "1st Half - Over/Under"],
+  ["69", "1st half - South Africa Over/Under"],
+  ["70", "1st half - Ivory Coast Over/Under"],
+  ["71", "1st Half - Exact Goals"],
+  ["74", "1st Half - Odd/Even"],
+  ["75", "1st Half - GG/NG"],
+  ["76", "1st Half - Home Team Clean Sheet"],
+  ["77", "1st Half - Away Team Clean Sheet"],
+  ["78", "1st Half - 1X2 & GG/NG"],
+  ["79", "1st Half - 1X2 & Over/Under 1.5"],
+  ["81", "1st Half - Correct Score"],
+  ["83", "2nd Half - 1X2"],
+  ["84", "2nd Half - 1st Goal"],
+  ["85", "2nd Half - Double Chance"],
+  ["86", "2nd Half - Draw No Bet"],
+  ["87", "2nd Half - Handicap"],
+  ["88", "2nd Half - Asian Handicap"],
+  ["90", "2nd Half - Over/Under"],
+  ["91", "2nd Half - South Africa Over/Under"],
+  ["92", "2nd Half - Ivory Coast Over/Under"],
+  ["93", "2nd Half - Exact Goals"],
+  ["94", "2nd Half - Odd/Even"],
+  ["95", "2nd Half - GG/NG"],
+  ["96", "2nd Half - Home Team Clean Sheet"],
+  ["97", "2nd Half - Away Team Clean Sheet"],
+  ["98", "2nd Half - Correct Score"],
+  ["100", "When will the 1st goal be scored (15 min interval)"],
+  ["101", "When will the 1st goal be scored (10 min interval)"],
+  ["105", "10 minutes - 1X2 from 1 to 10"],
+  ["162", "Corners - 1X2"],
+  ["163", "1st Corner"],
+  ["164", "Last Corner"],
+  ["165", "Corner Handicap"],
+  ["166", "Corners - Over/Under"],
+  ["169", "Corner Range"],
+  ["170", "Home Corner Range"],
+  ["171", "Away Corner Range"],
+  ["172", "Odd/Even Corners"],
+  ["173", "1st Half - Corner 1X2"],
+  ["174", "1st Half - 1st Corner"],
+  ["175", "1st Half - Last Corner"],
+  ["176", "1st Half - Corner Handicap"],
+  ["177", "1st Half Corners - Over/Under"],
+  ["180", "1st Half -Home Exact Corners"],
+  ["181", "1st Half -Away Exact Corners"],
+  ["182", "1st Half - Corner Range"],
+  ["183", "1st Half - Odd/Even Corners"],
+  ["184", "1st Goal & 1X2"]
+];
+
+/* 1X2 shorthand, still the fast path for the overwhelming majority of legs. */
 const OUTCOME_1X2 = { home: "1", "1": "1", draw: "2", x: "2", away: "3", "2": "3" };
+const DEFAULT_MARKET_IDS = ["1"];
+
+/*
+ * Team-named markets ("Ivory Coast Over/Under" is market 20, the away side's
+ * total) mean a label can't be compared literally — strip the club name first.
+ */
+/*
+ * Some SportyBet display names are combo outcomes underneath. "1st Half Home
+ * Team to Win to Nil" has no market of its own in the API — it is outcome
+ * "Home & no" on market 78 (1st Half - 1X2 & GG/NG): home wins the half and
+ * the other side doesn't score. Verified against the live USA vs Cuba event.
+ * Rewrite these before matching so they resolve to what actually exists.
+ */
+const MARKET_REWRITES = [
+  { test: /(1st|first)\s*half.*home.*win to nil|home.*win to nil.*(1st|first)\s*half/i,
+    market: "1st Half - 1X2 & GG/NG", pick: "Home & no", forceId: "78" },
+  { test: /(1st|first)\s*half.*away.*win to nil|away.*win to nil.*(1st|first)\s*half/i,
+    market: "1st Half - 1X2 & GG/NG", pick: "Away & no", forceId: "78" },
+];
+
+function applyRewrites(sel) {
+  const joined = `${sel.market || ""} ${sel.pick || ""}`;
+  for (const r of MARKET_REWRITES) {
+    if (r.test.test(joined)) return { ...sel, market: r.market, pick: r.pick, rewritten: true, forceId: r.forceId };
+  }
+  return sel;
+}
+
+function marketKey(label) {
+  return norm(String(label))
+    .replace(/\bover under\b/g, "overunder")
+    .replace(/\b(1st|first) half\b/g, "h1")
+    .replace(/\b(2nd|second) half\b/g, "h2");
+}
+
+/*
+ * Market-name similarity. simN's substring shortcut is right for TEAM names
+ * ("Salzburg" inside "FC Salzburg") but wrong for market names: "1X2" is a
+ * substring of "1st Half - 1X2 & GG/NG" yet they are entirely different bets.
+ * Token-set overlap (Jaccard) punishes missing words instead.
+ */
+function marketSim(a, b) {
+  const A = new Set(marketKey(a).split(" ").filter(Boolean));
+  const B = new Set(marketKey(b).split(" ").filter(Boolean));
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
+function idsForMarkets(labels) {
+  const ids = new Set(DEFAULT_MARKET_IDS);
+  for (const label of labels) {
+    if (!label || /^1x2$/i.test(label)) continue;
+    let best = null, bestScore = 0;
+    for (const [id, desc] of MARKET_CATALOGUE) {
+      const s = marketSim(label, desc);
+      if (s > bestScore) { bestScore = s; best = id; }
+    }
+    if (best && bestScore >= 0.4) ids.add(best);
+    if (/clean sheet/i.test(label)) { ids.add("31"); ids.add("32"); ids.add("76"); ids.add("77"); }
+    if (/win to nil/i.test(label)) { ids.add("33"); ids.add("34"); ids.add("78"); }
+    if (/over|under/i.test(label)) { ids.add("18"); ids.add("19"); ids.add("20"); ids.add("68"); }
+    if (/gg\/?ng|& (yes|no)/i.test(label)) { ids.add("29"); ids.add("78"); ids.add("35"); }
+  }
+  return [...ids].slice(0, 14);   // payload ceiling
+}
 
 /*
  * Netlify reuses a warm function instance between nearby calls, so caching
@@ -55,10 +236,10 @@ function cacheSet(page, events) {
   CACHE.pages.set(page, events);
 }
 
-function eventsUrl(pageNum) {
+function eventsUrl(pageNum, marketIds) {
   const p = new URLSearchParams({
     sportId: CONFIG.SPORT_ID,
-    marketId: CONFIG.MARKET_IDS,
+    marketId: (marketIds && marketIds.length ? marketIds : DEFAULT_MARKET_IDS).join(","),
     pageSize: String(CONFIG.PAGE_SIZE),
     pageNum: String(pageNum),
     todayGames: "false",
@@ -137,9 +318,10 @@ function splitSides(sel) {
 }
 
 /* Normalised once per selection, reused across every page of the catalogue. */
-function prepare(sel) {
+function prepare(raw) {
+  const sel = applyRewrites(raw);
   const { home, away } = splitSides(sel);
-  return { ...sel, nHome: norm(home), nAway: norm(away) };
+  return { ...sel, nHome: norm(home), nAway: norm(away), nHomeRaw: home, nAwayRaw: away };
 }
 
 function tryResolve(sel, events) {
@@ -158,23 +340,102 @@ function tryResolve(sel, events) {
       sides: bestSides,
     };
 
-  const market = best.markets.find((m) => String(m.id) === "1");
-  if (!market) return { error: `"${sel.match}" found, but it carries no 1X2 market` };
-  if (market.status !== 0) return { error: `1X2 on ${sel.match} is suspended` };
+  const label = String(sel.market || "1X2");
+  const pick = String(sel.pick || "");
+  const live = (best.markets || []).filter((m) => m.status === 0);
+  if (!live.length) return { error: `betting on ${sel.match} is closed for now — markets suspended (usual right before kickoff)` };
 
-  const wanted = OUTCOME_1X2[String(sel.pick || "").toLowerCase()];
-  if (!wanted) return { error: `"${sel.pick}" isn't a 1X2 pick (${sel.match})` };
+  let market = null, outcome = null;
 
-  const outcome = (market.outcomes || []).find((o) => String(o.id) === wanted);
-  if (!outcome) return { error: `no "${sel.pick}" outcome on ${sel.match}` };
-  if (outcome.isActive !== 1) return { error: `${sel.pick} on ${sel.match} is no longer available` };
+  if (/^1x2$/i.test(label) && !sel.rewritten) {
+    market = live.find((m) => String(m.id) === "1");
+    const want = OUTCOME_1X2[pick.toLowerCase()];
+    if (market && want) outcome = (market.outcomes || []).find((o) => String(o.id) === want);
+  }
+
+  /*
+   * Non-1X2 legs: the MARKET must match strongly on its own (>= 0.75) before
+   * outcomes are even considered. Scoring market and outcome jointly let a
+   * perfect outcome word on the WRONG market win — "1st Half Home Team to Win
+   * to Nil" once booked as plain 1X2 Home because "home" matched at 100%.
+   * A wrong bet placed silently is the worst outcome this code can produce;
+   * refusing is always preferable.
+   */
+  if (!outcome && sel.forceId) {
+    const fm = live.find((m) => String(m.id) === String(sel.forceId));
+    if (!fm) return { error: `${label} isn't offered on ${sel.match} yet` };
+    const pk = norm(pick);
+    let bo = null, bs = 0;
+    for (const o of fm.outcomes || []) {
+      if (o.isActive !== 1) continue;
+      const sc = simN(pk, norm(o.desc || ""));
+      if (sc > bs) { bs = sc; bo = o; }
+    }
+    if (!bo || bs < 0.7) return { error: `couldn't find "${pick}" on ${fm.desc} for ${sel.match}` };
+    market = fm; outcome = bo;
+  }
+
+  if (!outcome && !/^1x2$/i.test(label)) {
+    const key = marketKey(label), pickKey = norm(pick);
+    let bestM = null, bestMScore = 0;
+    for (const m of live) {
+      let mScore = marketSim(label, m.desc || m.name || "");
+      /* team-named markets: "Cuba Over/Under" should match "Away Under 0.5"
+         style labels — swap the club name for home/away before rescoring */
+      if (mScore < 0.75) {
+        const generic = String(m.desc || "").replace(sel.nAwayRaw || "\u0000", "Away").replace(sel.nHomeRaw || "\u0000", "Home");
+        mScore = Math.max(mScore, marketSim(label, generic));
+      }
+      if (mScore > bestMScore) { bestMScore = mScore; bestM = m; }
+    }
+    if (!bestM || bestMScore < 0.75)
+      return { error: `the "${label}" market isn't offered on ${sel.match} (closest was "${bestM ? bestM.desc : "none"}")` };
+
+    /*
+     * Over/Under and handicaps repeat per specifier (total=0.5, 1.5, 2.5...)
+     * as separate market entries with identical descriptions. The number in
+     * the pick decides which entry is right, and it must match EXACTLY —
+     * "Over 2.5" landing on "Over 2" is a different bet.
+     */
+    const nums = pick.match(/-?\d+(?:\.\d+)?/g) || [];
+    const candidates = live.filter((m) => marketSim(label, m.desc || "") >= bestMScore - 1e-9
+      || (m.desc === bestM.desc && String(m.id) === String(bestM.id)));
+
+    let bestO = null, bestOScore = 0, chosenM = null;
+    for (const m of candidates) {
+      for (const o of m.outcomes || []) {
+        if (o.isActive !== 1) continue;
+        const oNums = String(o.desc || "").match(/-?\d+(?:\.\d+)?/g) || [];
+        if (nums.length && !nums.every((n) => oNums.includes(n))) continue;
+        const oScore = simN(pickKey, norm(o.desc || ""));
+        if (oScore > bestOScore) { bestOScore = oScore; bestO = o; chosenM = m; }
+      }
+    }
+    if (!bestO || bestOScore < 0.8)
+      return { error: `couldn't find the "${pick}" outcome on "${bestM.desc}" for ${sel.match}` };
+    market = chosenM;
+    outcome = bestO;
+  }
+
+  if (!outcome)
+    return { error: `couldn't resolve "${pick}" on "${label}" for ${sel.match}` };
+
+  if (!market || !outcome) return { error: `no "${pick}" outcome on ${sel.match}` };
+  if (outcome.isActive !== 1) return { error: `${pick} on ${sel.match} is no longer available` };
 
   return {
-    booking: { eventId: best.eventId, marketId: "1", specifier: null, outcomeId: String(outcome.id) },
+    booking: {
+      eventId: best.eventId,
+      marketId: String(market.id),
+      specifier: market.specifier || null,
+      outcomeId: String(outcome.id),
+    },
     info: {
       name: `${best.home} vs ${best.away}`,
       kickoff: best.startTime ? new Date(best.startTime).toISOString() : null,
       competition: [best.country, best.tournament].filter(Boolean).join(" · "),
+      market: market.desc || market.name,
+      outcome: outcome.desc,
       nameMatch: `${Math.round(bestScore * 100)}% name similarity`,  // text match, NOT odds
       liveOdds: Number(outcome.odds),
       yourOdds: sel.odds ?? null,
@@ -189,6 +450,8 @@ function tryResolve(sel, events) {
  * far ahead we can reach.
  */
 async function resolveAll(selections) {
+  const marketIds = idsForMarkets([...new Set(selections.map((s) => s.market || "1X2"))]);
+  for (const s of selections) if (s.forceId && !marketIds.includes(s.forceId)) marketIds.push(s.forceId);
   const results = new Array(selections.length).fill(null);
   let remaining = selections.map((_, i) => i);
   const bestSeen = new Array(selections.length).fill(0);
@@ -196,9 +459,9 @@ async function resolveAll(selections) {
   let scanned = 0, pagesRead = 0;
 
   async function readPage(page) {
-    const hit = cacheGet(page);
+    const hit = cacheGet(marketIds.join(",") + ":" + page);
     if (hit) return hit;
-    const res = await fetch(eventsUrl(page), { headers: CONFIG.HEADERS });
+    const res = await fetch(eventsUrl(page, marketIds), { headers: CONFIG.HEADERS });
     if (!res.ok) throw new Error(`fixture list page ${page} returned ${res.status}`);
     const json = await res.json();
     if (json.bizCode && json.bizCode !== 10000)
@@ -206,7 +469,7 @@ async function resolveAll(selections) {
     const events = [];
     for (const t of json?.data?.tournaments || [])
       for (const e of t.events || []) events.push(normaliseEvent(e, t));
-    cacheSet(page, events);
+    cacheSet(marketIds.join(",") + ":" + page, events);
     return events;
   }
 
@@ -282,33 +545,50 @@ export async function handler(event) {
 
     try {
       const selections = String(event.queryStringParameters.slip).split("|").filter(Boolean).map((row) => {
-        const [home, away, pick] = row.split("~");
-        return prepare({ match: `${home} vs ${away}`, home, away, pick: pick || "Home" });
+        const [home, away, pick, market] = row.split("~");
+        return prepare({ match: `${home} vs ${away}`, home, away, pick: pick || "Home", market: market || "1X2" });
       });
       if (!selections.length) return html(`<p style="color:#C25B47">Empty slip.</p>`);
 
+      const strict = event.queryStringParameters.strict === "1";
       const { results, scanned } = await resolveAll(selections);
-      const failures = results.filter((r) => r.error).map((r) => r.error);
-      if (failures.length)
-        return html(`<h2 style="font-size:17px;font-weight:600;margin:0 0 14px">${failures.length} of ${selections.length} couldn't be resolved</h2>`
-          + failures.map((f) => `<p style="color:#C25B47;font-size:14px;border-left:2px solid #C25B47;padding-left:12px">${f}</p>`).join("")
-          + `<p style="color:#8A94A3;font-size:13px;margin-top:20px">Scanned ${scanned} fixtures. Remove these legs in the Slip Engine and try again.</p>`);
+
+      const kept = [], dropped = [];
+      results.forEach((r, i) => (r.error ? dropped.push({ name: selections[i].match, why: r.error }) : kept.push(r)));
+
+      if (strict && dropped.length)
+        return html(`<h2 style="font-size:17px;font-weight:600;margin:0 0 14px">${dropped.length} of ${selections.length} couldn't be resolved</h2>`
+          + dropped.map((d) => `<p style="color:#C25B47;font-size:14px;border-left:2px solid #C25B47;padding-left:12px">${d.why}</p>`).join(""));
+
+      if (!kept.length)
+        return html(`<h2 style="font-size:17px;font-weight:600;margin:0 0 14px">Nothing could be booked</h2>`
+          + dropped.map((d) => `<p style="color:#C25B47;font-size:14px;border-left:2px solid #C25B47;padding-left:12px">${d.why}</p>`).join("")
+          + `<p style="color:#8A94A3;font-size:13px;margin-top:18px">Scanned ${scanned} fixtures.</p>`);
 
       const res = await fetch(CONFIG.BOOKING_URL, {
         method: "POST", headers: CONFIG.HEADERS,
-        body: JSON.stringify({ selections: results.map((r) => r.booking) }),
+        body: JSON.stringify({ selections: kept.map((r) => r.booking) }),
       });
       const data = await res.json();
       const code = data?.data?.shareCode;
       if (!code) return html(`<p style="color:#C25B47">SportyBet returned no code (HTTP ${res.status}).</p>`);
 
-      const info = results.map((r) => r.info);
+      const info = kept.map((r) => r.info);
       const total = info.reduce((a, i) => a * i.liveOdds, 1).toFixed(2);
+
+      const droppedBlock = dropped.length ? `
+<div style="background:#2A1A17;border:1px solid #C25B47;border-radius:8px;padding:14px;margin-bottom:18px">
+<div style="color:#E0A02E;font-size:12px;font-weight:700;letter-spacing:.08em;margin-bottom:8px">DROPPED ${dropped.length} LEG${dropped.length > 1 ? "S" : ""}</div>
+${dropped.map((d) => `<div style="font-size:13px;color:#EFE9DC;margin-bottom:4px">${d.name}</div>`).join("")}
+<div style="color:#8A94A3;font-size:12px;margin-top:8px">Kicked off, or not open for betting. The odds below are for the ${info.length} legs that booked.</div>
+</div>` : "";
+
       return html(
         `<div style="max-width:520px;margin:0 auto">
 <div style="font-size:11px;letter-spacing:.2em;color:#E0A02E;font-weight:700">BOOKING CODE</div>
 <div style="font-family:ui-monospace,monospace;font-size:46px;font-weight:700;letter-spacing:.14em;margin:6px 0 4px">${code}</div>
-<div style="color:#8A94A3;font-size:14px;margin-bottom:20px">${info.length} legs &middot; ${total} combined</div>
+<div style="color:#8A94A3;font-size:14px;margin-bottom:20px">${info.length} of ${selections.length} legs &middot; ${total} combined</div>
+${droppedBlock}
 <a href="${data?.data?.shareURL || "https://www.sportybet.com/ng/?shareCode=" + code}" style="display:block;background:#E0A02E;color:#12161B;text-decoration:none;text-align:center;padding:15px;border-radius:8px;font-weight:700;margin-bottom:10px">Open in SportyBet</a>
 <button onclick="navigator.clipboard.writeText('${code}');this.textContent='Copied'" style="width:100%;background:#212936;color:#EFE9DC;border:1px solid #2E3846;padding:14px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">Copy code</button>
 <div style="margin-top:24px;border-top:1px solid #2E3846;padding-top:16px">`
@@ -322,7 +602,7 @@ export async function handler(event) {
   /* GET — health check. Reads the catalogue, books nothing. */
   if (event.httpMethod === "GET") {
     try {
-      const res = await fetch(eventsUrl(1), { headers: CONFIG.HEADERS });
+      const res = await fetch(eventsUrl(1, DEFAULT_MARKET_IDS), { headers: CONFIG.HEADERS });
       const json = await res.json();
       const t = json?.data?.tournaments?.[0];
       return {
