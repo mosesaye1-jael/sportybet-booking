@@ -587,20 +587,25 @@ export async function handler(event) {
        * A copy/paste hand-off is used instead of postMessage because the Slip
        * Engine runs in a sandboxed iframe — a tab opened from it has no usable
        * reference back, so messaging silently never arrives. */
-      const lines = wanted
-        .map((sel, i) => {
-          const ko = results[i]?.info?.kickoff;
-          return ko ? `${sel.nHomeRaw}~${sel.nAwayRaw}~${Date.parse(ko)}` : null;
-        })
-        .filter(Boolean);
-
-      const missing = wanted.length - lines.length;
+      /*
+       * Emit a row for EVERY fixture asked about, including ones with no time.
+       * A "0" marks it as looked-up-but-not-found, so the app can tell that
+       * apart from never-checked and stop asking about it again. Fixtures
+       * vanish from SportyBet's upcoming list once they kick off, which is the
+       * usual reason a slip screenshot contains matches with no time left.
+       */
+      const lines = wanted.map((sel, i) => {
+        const ko = results[i]?.info?.kickoff;
+        return `${sel.nHomeRaw}~${sel.nAwayRaw}~${ko ? Date.parse(ko) : 0}`;
+      });
+      const found = lines.filter((l) => !l.endsWith("~0")).length;
+      const missing = wanted.length - found;
       return page(
         `<div style="max-width:560px;margin:0 auto">
 <div style="font-size:11px;letter-spacing:.2em;color:#E0A02E;font-weight:700">KICKOFF DATES</div>
-<div style="font-size:20px;font-weight:600;margin:6px 0 4px">${lines.length} of ${wanted.length} found</div>
-<div style="color:#8A94A3;font-size:13px;margin-bottom:16px">${missing ? missing + " fixture(s) aren't in SportyBet's upcoming list. " : ""}Copy this and paste it into the Slip Engine's date box.</div>
-<button id="c" style="width:100%;background:#E0A02E;color:#12161B;border:0;padding:16px;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:12px">Copy all ${lines.length}</button>
+<div style="font-size:20px;font-weight:600;margin:6px 0 4px">${found} of ${wanted.length} found</div>
+<div style="color:#8A94A3;font-size:13px;margin-bottom:16px">${missing ? missing + " have already kicked off or aren't open for betting — they're included below marked 0 so the app stops asking about them. " : ""}Copy all of it and paste into the Slip Engine.</div>
+<button id="c" style="width:100%;background:#E0A02E;color:#12161B;border:0;padding:16px;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:12px">Copy all ${lines.length} rows</button>
 <textarea id="t" readonly style="width:100%;height:230px;background:#0D1116;color:#57A99A;border:1px solid #2E3846;border-radius:8px;padding:12px;font-family:ui-monospace,monospace;font-size:12px;box-sizing:border-box">${lines.join("\n")}</textarea>
 </div>
 <script>
