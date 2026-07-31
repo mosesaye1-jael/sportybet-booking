@@ -570,11 +570,11 @@ export async function handler(event) {
    * can message its opener. The tab closes itself once delivered.
    */
   if (event.httpMethod === "GET" && event.queryStringParameters?.dates) {
-    const page = (body, script) => ({
+    const page = (body) => ({
       statusCode: 200,
       headers: { ...cors, "Content-Type": "text/html; charset=utf-8" },
       body: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Kickoff dates</title><body style="margin:0;background:#12161B;color:#EFE9DC;font-family:system-ui,sans-serif;padding:28px 20px">${body}<script>${script}</script></body>`,
+<title>Kickoff dates</title><body style="margin:0;background:#12161B;color:#EFE9DC;font-family:system-ui,sans-serif;padding:24px 18px;line-height:1.6">${body}</body>`,
     });
     try {
       const wanted = String(event.queryStringParameters.dates).split("|").filter(Boolean).map((row) => {
@@ -582,21 +582,37 @@ export async function handler(event) {
         return prepare({ match: `${home} vs ${away}`, home, away, pick: "Home", market: "1X2" });
       });
       const { results } = await resolveAll(wanted, null);
-      const payload = wanted.map((sel, i) => ({
-        home: sel.nHomeRaw, away: sel.nAwayRaw,
-        kickoff: results[i]?.info?.kickoff || null,
-        found: !results[i]?.error,
-      }));
-      const foundN = payload.filter((p) => p.found).length;
+
+      /* Compact, paste-able payload: home~away~epochMs, one per line.
+       * A copy/paste hand-off is used instead of postMessage because the Slip
+       * Engine runs in a sandboxed iframe — a tab opened from it has no usable
+       * reference back, so messaging silently never arrives. */
+      const lines = wanted
+        .map((sel, i) => {
+          const ko = results[i]?.info?.kickoff;
+          return ko ? `${sel.nHomeRaw}~${sel.nAwayRaw}~${Date.parse(ko)}` : null;
+        })
+        .filter(Boolean);
+
+      const missing = wanted.length - lines.length;
       return page(
-        `<div style="max-width:420px;margin:0 auto;text-align:center">
-<div style="font-size:15px;font-weight:600">Kickoff dates loaded</div>
-<div style="color:#8A94A3;font-size:13px;margin-top:6px">${foundN} of ${payload.length} fixtures found. This tab will close itself — if it doesn't, just close it and return to the Slip Engine.</div></div>`,
-        `try{ if(window.opener) window.opener.postMessage({type:"slipengine-dates",dates:${JSON.stringify(payload)}},"*"); }catch(e){}
-setTimeout(function(){ try{window.close()}catch(e){} }, 1200);`
+        `<div style="max-width:560px;margin:0 auto">
+<div style="font-size:11px;letter-spacing:.2em;color:#E0A02E;font-weight:700">KICKOFF DATES</div>
+<div style="font-size:20px;font-weight:600;margin:6px 0 4px">${lines.length} of ${wanted.length} found</div>
+<div style="color:#8A94A3;font-size:13px;margin-bottom:16px">${missing ? missing + " fixture(s) aren't in SportyBet's upcoming list. " : ""}Copy this and paste it into the Slip Engine's date box.</div>
+<button id="c" style="width:100%;background:#E0A02E;color:#12161B;border:0;padding:16px;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:12px">Copy all ${lines.length}</button>
+<textarea id="t" readonly style="width:100%;height:230px;background:#0D1116;color:#57A99A;border:1px solid #2E3846;border-radius:8px;padding:12px;font-family:ui-monospace,monospace;font-size:12px;box-sizing:border-box">${lines.join("\n")}</textarea>
+</div>
+<script>
+document.getElementById('c').onclick=function(){
+  var t=document.getElementById('t');t.select();t.setSelectionRange(0,999999);
+  try{navigator.clipboard.writeText(t.value)}catch(e){try{document.execCommand('copy')}catch(e2){}}
+  this.textContent='Copied — go back and paste';
+};
+</script>`
       );
     } catch (e) {
-      return page(`<p style="color:#C25B47">${e.message}</p>`, "");
+      return page(`<p style="color:#C25B47">${e.message}</p>`);
     }
   }
 
