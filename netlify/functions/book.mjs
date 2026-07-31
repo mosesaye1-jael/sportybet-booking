@@ -324,21 +324,34 @@ function prepare(raw) {
   return { ...sel, nHome: norm(home), nAway: norm(away), nHomeRaw: home, nAwayRaw: away };
 }
 
-function tryResolve(sel, events) {
+function tryResolve(sel, events, window) {
   let best = null, bestScore = 0, bestSides = [0, 0];
+  let outsideWindow = null;
   for (const ev of events) {
+    if (window && ev.startTime) {
+      if (ev.startTime < window.from || ev.startTime > window.to) {
+        /* still track it so the refusal can say WHEN it kicks off */
+        const h0 = simN(sel.nHome, ev.nHome), a0 = simN(sel.nAway, ev.nAway);
+        if ((h0 + a0) / 2 >= MATCH_THRESHOLD && h0 >= SIDE_THRESHOLD && a0 >= SIDE_THRESHOLD)
+          outsideWindow = ev;
+        continue;
+      }
+    }
     const h = simN(sel.nHome, ev.nHome), a = simN(sel.nAway, ev.nAway);
     const score = (h + a) / 2;
     if (score > bestScore) { bestScore = score; best = ev; bestSides = [h, a]; }
   }
   const sidesOk = bestSides[0] >= SIDE_THRESHOLD && bestSides[1] >= SIDE_THRESHOLD;
-  if (!best || bestScore < MATCH_THRESHOLD || !sidesOk)
+  if (!best || bestScore < MATCH_THRESHOLD || !sidesOk) {
+    if (outsideWindow)
+      return { error: `${outsideWindow.home} vs ${outsideWindow.away} kicks off ${new Date(outsideWindow.startTime).toISOString().slice(0, 10)}, outside your date range` };
     return {
       pending: true,
       bestScore,
       nearest: best ? `${best.home} vs ${best.away}` : null,
       sides: bestSides,
     };
+  }
 
   const label = String(sel.market || "1X2");
   const pick = String(sel.pick || "");
@@ -449,7 +462,7 @@ function tryResolve(sel, events) {
  * may sit on page 15. This keeps the common case fast without capping how
  * far ahead we can reach.
  */
-async function resolveAll(selections) {
+async function resolveAll(selections, window) {
   const marketIds = idsForMarkets([...new Set(selections.map((s) => s.market || "1X2"))]);
   for (const s of selections) if (s.forceId && !marketIds.includes(s.forceId)) marketIds.push(s.forceId);
   const results = new Array(selections.length).fill(null);
@@ -492,7 +505,7 @@ async function resolveAll(selections) {
 
     const stillPending = [];
     for (const i of remaining) {
-      const r = tryResolve(selections[i], events);
+      const r = tryResolve(selections[i], events, window);
       if (r.pending) {
         if ((r.bestScore || 0) > bestSeen[i]) { bestSeen[i] = r.bestScore; nearest[i] = r.nearest; }
         stillPending.push(i);
@@ -518,6 +531,28 @@ async function resolveAll(selections) {
   return { results, scanned, pagesRead };
 }
 
+/*
+ * Date window parsing. from/to arrive as YYYY-MM-DD and are INCLUSIVE whole
+ * days in West Africa Time (UTC+1) — the user's clock, not the server's.
+ * A single-day bracket is from == to.
+ */
+const WAT_OFFSET_MS = 60 * 60 * 1000;
+function parseWindow(fromStr, toStr, toHourStr) {
+  if (!fromStr && !toStr) return null;
+  const toHour = /^\d{1,2}$/.test(toHourStr || "") ? Number(toHourStr) : null;
+  const parse = (str, endOfDay) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(str || "")) return null;
+    const t = Date.parse(str + "T00:00:00Z") - WAT_OFFSET_MS;
+    if (!endOfDay) return t;
+    /* partial final day: weekend brackets end Monday morning, not Monday night */
+    return toHour == null ? t + 24 * 60 * 60 * 1000 - 1 : t + toHour * 3600000 - 1;
+  };
+  const from = parse(fromStr, false) ?? 0;
+  const to = parse(toStr, true) ?? Number.MAX_SAFE_INTEGER;
+  if (from > to) return { error: "your 'from' date is after your 'to' date" };
+  return { from, to };
+}
+
 /* ---------- handler ---------- */
 export async function handler(event) {
   const cors = {
@@ -527,6 +562,43 @@ export async function handler(event) {
     "Content-Type": "application/json",
   };
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
+
+  /*
+   * GET ?dates=home~away|home~away — resolves kickoff times for a list of
+   * fixtures and hands them BACK to the Slip Engine via postMessage. The
+   * artifact sandbox can't fetch() this origin, but a page we open in a tab
+   * can message its opener. The tab closes itself once delivered.
+   */
+  if (event.httpMethod === "GET" && event.queryStringParameters?.dates) {
+    const page = (body, script) => ({
+      statusCode: 200,
+      headers: { ...cors, "Content-Type": "text/html; charset=utf-8" },
+      body: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kickoff dates</title><body style="margin:0;background:#12161B;color:#EFE9DC;font-family:system-ui,sans-serif;padding:28px 20px">${body}<script>${script}</script></body>`,
+    });
+    try {
+      const wanted = String(event.queryStringParameters.dates).split("|").filter(Boolean).map((row) => {
+        const [home, away] = row.split("~");
+        return prepare({ match: `${home} vs ${away}`, home, away, pick: "Home", market: "1X2" });
+      });
+      const { results } = await resolveAll(wanted, null);
+      const payload = wanted.map((sel, i) => ({
+        home: sel.nHomeRaw, away: sel.nAwayRaw,
+        kickoff: results[i]?.info?.kickoff || null,
+        found: !results[i]?.error,
+      }));
+      const foundN = payload.filter((p) => p.found).length;
+      return page(
+        `<div style="max-width:420px;margin:0 auto;text-align:center">
+<div style="font-size:15px;font-weight:600">Kickoff dates loaded</div>
+<div style="color:#8A94A3;font-size:13px;margin-top:6px">${foundN} of ${payload.length} fixtures found. This tab will close itself — if it doesn't, just close it and return to the Slip Engine.</div></div>`,
+        `try{ if(window.opener) window.opener.postMessage({type:"slipengine-dates",dates:${JSON.stringify(payload)}},"*"); }catch(e){}
+setTimeout(function(){ try{window.close()}catch(e){} }, 1200);`
+      );
+    } catch (e) {
+      return page(`<p style="color:#C25B47">${e.message}</p>`, "");
+    }
+  }
 
   /*
    * GET ?slip=... — books a slip and returns a page.
@@ -551,7 +623,9 @@ export async function handler(event) {
       if (!selections.length) return html(`<p style="color:#C25B47">Empty slip.</p>`);
 
       const strict = event.queryStringParameters.strict === "1";
-      const { results, scanned } = await resolveAll(selections);
+      const window = parseWindow(event.queryStringParameters.from, event.queryStringParameters.to, event.queryStringParameters.toHour);
+      if (window?.error) return html(`<p style="color:#C25B47">${window.error}</p>`);
+      const { results, scanned } = await resolveAll(selections, window);
 
       const kept = [], dropped = [];
       results.forEach((r, i) => (r.error ? dropped.push({ name: selections[i].match, why: r.error }) : kept.push(r)));
@@ -579,8 +653,8 @@ export async function handler(event) {
       const droppedBlock = dropped.length ? `
 <div style="background:#2A1A17;border:1px solid #C25B47;border-radius:8px;padding:14px;margin-bottom:18px">
 <div style="color:#E0A02E;font-size:12px;font-weight:700;letter-spacing:.08em;margin-bottom:8px">DROPPED ${dropped.length} LEG${dropped.length > 1 ? "S" : ""}</div>
-${dropped.map((d) => `<div style="font-size:13px;color:#EFE9DC;margin-bottom:4px">${d.name}</div>`).join("")}
-<div style="color:#8A94A3;font-size:12px;margin-top:8px">Kicked off, or not open for betting. The odds below are for the ${info.length} legs that booked.</div>
+${dropped.map((d) => `<div style="font-size:13px;color:#EFE9DC;margin-bottom:2px">${d.name}</div><div style="font-size:11.5px;color:#C88;margin-bottom:8px">${d.why.replace(/"/g, "&quot;")}</div>`).join("")}
+<div style="color:#8A94A3;font-size:12px;margin-top:8px">Kicked off, outside your date range, or not open for betting. The odds below are for the ${info.length} legs that booked.</div>
 </div>` : "";
 
       return html(
@@ -629,12 +703,15 @@ ${droppedBlock}
     return { statusCode: 405, headers: cors, body: JSON.stringify({ error: "POST a slip, or GET for a health check" }) };
 
   try {
-    const { selections: raw } = JSON.parse(event.body || "{}");
+    const { selections: raw, from, to, toHour } = JSON.parse(event.body || "{}");
     if (!Array.isArray(raw) || !raw.length)
       return { statusCode: 400, headers: cors, body: JSON.stringify({ error: "send { selections: [...] }" }) };
+    const window = parseWindow(from, to, toHour == null ? null : String(toHour));
+    if (window?.error)
+      return { statusCode: 400, headers: cors, body: JSON.stringify({ error: window.error }) };
     const selections = raw.map(prepare);
 
-    const { results, scanned, pagesRead } = await resolveAll(selections);
+    const { results, scanned, pagesRead } = await resolveAll(selections, window);
     if (!scanned)
       return { statusCode: 502, headers: cors, body: JSON.stringify({ error: "fixture list came back empty — likely a region restriction on outbound calls" }) };
 
