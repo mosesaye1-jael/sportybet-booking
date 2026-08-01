@@ -564,6 +564,101 @@ export async function handler(event) {
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: cors, body: "" };
 
   /*
+   * GET ?load=CODE — reads an existing SportyBet booking code back into a
+   * pool. GET /orders/share/{code} is anonymous like the rest of the API and
+   * returns everything the Slip Engine needs in ONE call: teams, market,
+   * pick, live odds, kickoff epoch, country and league. No fixture-list
+   * scan, no fuzzy matching, no separate kickoff lookup.
+   */
+  if (event.httpMethod === "GET" && event.queryStringParameters?.load) {
+    const code = String(event.queryStringParameters.load).trim().toUpperCase();
+    const page = (body) => ({
+      statusCode: 200,
+      headers: { ...cors, "Content-Type": "text/html; charset=utf-8" },
+      body: `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Booking codes</title><body style="margin:0;background:#12161B;color:#EFE9DC;font-family:system-ui,sans-serif;padding:24px 18px;line-height:1.6">${body}</body>`,
+    });
+    try {
+      /* several codes at once, the way screenshot import takes several files */
+      const codes = [...new Set(code.split(/[^A-Z0-9]+/).filter(Boolean))].slice(0, 40);
+      const bad = codes.filter((c) => !/^[A-Z0-9]{4,12}$/.test(c));
+      if (!codes.length || bad.length)
+        return page(`<p style="color:#C25B47">${bad.length ? `"${bad.join('", "')}" doesn't look like a booking code.` : "No booking code given."}</p>`);
+
+      const clean = (x) => String(x == null ? "" : x).replace(/[~|\r\n]/g, " ").trim();
+      const rows = [], skipped = [], failed = [], started = [], seen = new Set();
+      const perCode = [];
+
+      /* fetched in batches so a long list can't stampede the API or the 10s limit */
+      const one = async (c) => {
+        try {
+          const res = await fetch(`${CONFIG.BOOKING_URL}/${encodeURIComponent(c)}`, { headers: CONFIG.HEADERS });
+          const data = await res.json();
+          if (data?.bizCode !== 10000 || !data?.data)
+            return { c, err: data?.message || `HTTP ${res.status}` };
+          return { c, outcomes: data.data.outcomes || [] };
+        } catch (e) { return { c, err: String(e.message || e) }; }
+      };
+      const loaded = [];
+      for (let i = 0; i < codes.length; i += CONFIG.BATCH)
+        loaded.push(...await Promise.all(codes.slice(i, i + CONFIG.BATCH).map(one)));
+
+      for (const L of loaded) {
+        if (L.err) { failed.push(`${L.c} (${L.err})`); continue; }
+        let n = 0;
+        for (const o of L.outcomes) {
+          const m = (o.markets || [])[0];
+          const oc = m && (m.outcomes || [])[0];
+          if (!m || !oc) { skipped.push(`${o.homeTeamName} vs ${o.awayTeamName}`); continue; }
+          /* the same fixture can sit on more than one code — keep it once */
+          const key = clean(o.homeTeamName).toLowerCase() + "|" + clean(o.awayTeamName).toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          /*
+           * A code can carry matches that have since kicked off — SportyBet
+           * still shows them, but they can't be booked again. Drop them here
+           * rather than let them into the pool as dead weight.
+           */
+          const ko = Number(o.estimateStartTime) || 0;
+          const live = String(o.matchStatus || "").toLowerCase();
+          if ((ko && ko <= Date.now()) || (live && live !== "not start")) {
+            started.push(`${clean(o.homeTeamName)} v ${clean(o.awayTeamName)}`);
+            continue;
+          }
+          rows.push([clean(o.homeTeamName), clean(o.awayTeamName), clean(oc.desc),
+                     clean(m.desc), Number(oc.odds) || 0, Number(o.estimateStartTime) || 0].join("~"));
+          n++;
+        }
+        perCode.push(`${L.c}: ${n}`);
+      }
+      if (!rows.length)
+        return page(`<p style="color:#C25B47">Nothing to add${started.length ? ` — all ${started.length} selection${started.length > 1 ? "s have" : " has"} already kicked off` : ""}.</p>`
+          + (failed.length ? `<p style="color:#8A94A3;font-size:13px">${failed.join("<br>")}</p>` : ""));
+
+      const block = rows.join("\n");
+      const esc = (x) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+      return page(`<div style="max-width:560px;margin:0 auto">
+<div style="font-size:11px;letter-spacing:.2em;color:#E0A02E;font-weight:700">BOOKING CODE${codes.length > 1 ? "S" : ""} ${esc(codes.join(", "))}</div>
+<div style="font-size:20px;font-weight:600;margin:6px 0 4px">${rows.length} selection${rows.length === 1 ? "" : "s"} loaded</div>
+<div style="color:#8A94A3;font-size:13px;margin-bottom:16px">Kickoff times and live odds are included — copy all of it and paste into the Slip Engine.${codes.length > 1 ? ` (${esc(perCode.join(" · "))}; fixtures on more than one code are kept once.)` : ""}</div>
+${failed.length ? `<div style="color:#C25B47;font-size:13px;margin-bottom:12px">Couldn't load ${esc(failed.join(", "))}</div>` : ""}
+${started.length ? `<div style="color:#C25B47;font-size:13px;margin-bottom:12px">Left out ${started.length} already kicked off: ${esc(started.join(", "))}</div>` : ""}
+${skipped.length ? `<div style="color:#C25B47;font-size:13px;margin-bottom:12px">Skipped ${skipped.length}: ${esc(skipped.join(", "))}</div>` : ""}
+<button id="c" style="width:100%;background:#E0A02E;color:#12161B;border:0;padding:16px;border-radius:8px;font-size:16px;font-weight:700;cursor:pointer">Copy all</button>
+<textarea id="t" readonly style="width:100%;height:200px;margin-top:14px;background:#1A2029;color:#EFE9DC;border:1px solid #2E3846;border-radius:8px;padding:12px;font-family:ui-monospace,monospace;font-size:12px">${esc(block)}</textarea>
+</div>
+<script>
+var t=document.getElementById('t'),c=document.getElementById('c');
+c.onclick=function(){t.select();try{document.execCommand('copy')}catch(e){}
+if(navigator.clipboard)navigator.clipboard.writeText(t.value).catch(function(){});
+c.textContent='Copied';setTimeout(function(){c.textContent='Copy all'},1500);};
+</script>`);
+    } catch (err) {
+      return page(`<p style="color:#C25B47">Couldn't load that code: ${String(err.message || err)}</p>`);
+    }
+  }
+
+  /*
    * GET ?dates=home~away|home~away — resolves kickoff times for a list of
    * fixtures and hands them BACK to the Slip Engine via postMessage. The
    * artifact sandbox can't fetch() this origin, but a page we open in a tab
