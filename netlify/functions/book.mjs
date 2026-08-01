@@ -46,6 +46,20 @@ const CONFIG = {
  */
 const MARKET_CATALOGUE = [
   ["1", "1X2"],
+  /*
+   * SportyBet's "UP" and "Never Down" promos are SEPARATE markets, not
+   * variants of 1X2 — a slip carrying them looked fine in the engine but the
+   * booking step dropped every such leg, because the fixtures fetch only ever
+   * asked for market 1 and the promo market was never in the data. Discovered
+   * live by sweeping the 601xx/602xx/603xx range on 1 Aug.
+   */
+  ["60100", "1X2 - 2UP"],
+  ["60200", "1X2 - 1UP"],
+  ["60210", "1X2 - Never Down"],
+  ["60110", "Double Chance - 1UP"],
+  ["60300", "Any Team to lead by 1 Goal at any time"],
+  ["60301", "Any Team to lead by 2 Goals at any time"],
+  ["60302", "Any Team to lead by 3 Goals at any time"],
   ["8", "1st Goal"],
   ["9", "Last Goal"],
   ["10", "Double Chance"],
