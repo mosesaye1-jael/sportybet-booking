@@ -600,7 +600,7 @@ export async function handler(event) {
         return page(`<p style="color:#C25B47">${bad.length ? `"${bad.join('", "')}" doesn't look like a booking code.` : "No booking code given."}</p>`);
 
       const clean = (x) => String(x == null ? "" : x).replace(/[~|\r\n]/g, " ").trim();
-      const rows = [], skipped = [], failed = [], started = [], seen = new Set();
+      const rows = [], skipped = [], failed = [], started = [], seen = new Map(), counted = new Map();
       const perCode = [];
 
       /* fetched in batches so a long list can't stampede the API or the 10s limit */
@@ -619,41 +619,49 @@ export async function handler(event) {
 
       for (const L of loaded) {
         if (L.err) { failed.push(`${L.c} (${L.err})`); continue; }
+        counted.set(L.c, { n: 0 });
         let n = 0;
         for (const o of L.outcomes) {
           const m = (o.markets || [])[0];
           const oc = m && (m.outcomes || [])[0];
           if (!m || !oc) { skipped.push(`${o.homeTeamName} vs ${o.awayTeamName}`); continue; }
           /* the same fixture can sit on more than one code — keep it once */
-          const key = clean(o.homeTeamName).toLowerCase() + "|" + clean(o.awayTeamName).toLowerCase();
-          if (seen.has(key)) continue;
-          seen.add(key);
-          /*
-           * A code can carry matches that have since kicked off — SportyBet
-           * still shows them, but they can't be booked again. Drop them here
-           * rather than let them into the pool as dead weight.
-           */
           const ko = Number(o.estimateStartTime) || 0;
           const live = String(o.matchStatus || "").toLowerCase();
           if ((ko && ko <= Date.now()) || (live && live !== "not start")) {
             started.push(`${clean(o.homeTeamName)} v ${clean(o.awayTeamName)}`);
             continue;
           }
+          const key = clean(o.homeTeamName).toLowerCase() + "|" + clean(o.awayTeamName).toLowerCase();
+          /*
+           * A fixture on several codes is still emitted once, but its source
+           * field lists EVERY code it belongs to. Keeping only the first meant
+           * a code whose selections all appeared earlier reported zero — which
+           * looked like a failed load and destroyed the provenance the field
+           * exists for.
+           */
+          if (seen.has(key)) { seen.get(key).push(L.c); counted.get(L.c).n++; continue; }
+          seen.set(key, [L.c]);
+          /*
+           * A code can carry matches that have since kicked off — SportyBet
+           * still shows them, but they can't be booked again. Drop them here
+           * rather than let them into the pool as dead weight.
+           */
           /* 7th field records WHICH code a row came from, so a single paste of
              several codes keeps its provenance instead of arriving as one
              anonymous blob */
-          rows.push([clean(o.homeTeamName), clean(o.awayTeamName), clean(oc.desc),
-                     clean(m.desc), Number(oc.odds) || 0, Number(o.estimateStartTime) || 0,
-                     L.c].join("~"));
+          rows.push({ key, cells: [clean(o.homeTeamName), clean(o.awayTeamName), clean(oc.desc),
+                     clean(m.desc), Number(oc.odds) || 0, Number(o.estimateStartTime) || 0] });
           n++;
         }
-        perCode.push(`${L.c}: ${n}`);
+        perCode.push(`${L.c}: ${n + (counted.get(L.c)?.n || 0)}`);
       }
       if (!rows.length)
         return page(`<p style="color:#C25B47">Nothing to add${started.length ? ` — all ${started.length} selection${started.length > 1 ? "s have" : " has"} already kicked off` : ""}.</p>`
           + (failed.length ? `<p style="color:#8A94A3;font-size:13px">${failed.join("<br>")}</p>` : ""));
 
-      const block = rows.join("\n");
+      /* every source now attached, so serialise */
+      const block = rows.map((r) => [...r.cells, (seen.get(r.key) || []).join("+")].join("~")).join("\n");
       const esc = (x) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;");
       return page(`<div style="max-width:560px;margin:0 auto">
 <div style="font-size:11px;letter-spacing:.2em;color:#E0A02E;font-weight:700">BOOKING CODE${codes.length > 1 ? "S" : ""} ${esc(codes.join(", "))}</div>
