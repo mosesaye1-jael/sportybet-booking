@@ -639,8 +639,12 @@ export async function handler(event) {
             started.push(`${clean(o.homeTeamName)} v ${clean(o.awayTeamName)}`);
             continue;
           }
+          /* 7th field records WHICH code a row came from, so a single paste of
+             several codes keeps its provenance instead of arriving as one
+             anonymous blob */
           rows.push([clean(o.homeTeamName), clean(o.awayTeamName), clean(oc.desc),
-                     clean(m.desc), Number(oc.odds) || 0, Number(o.estimateStartTime) || 0].join("~"));
+                     clean(m.desc), Number(oc.odds) || 0, Number(o.estimateStartTime) || 0,
+                     L.c].join("~"));
           n++;
         }
         perCode.push(`${L.c}: ${n}`);
